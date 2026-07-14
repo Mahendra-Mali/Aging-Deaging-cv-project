@@ -64,14 +64,15 @@ def download_model():
 def align_face(image, predictor):
     """Simple face alignment using dlib"""
     detector = dlib.get_frontal_face_detector()
-    dlib_image = image
+    # Convert PIL image to numpy array for dlib
+    np_image = np.array(image.convert("RGB"))
     
-    dets = detector(dlib_image, 1)
+    dets = detector(np_image, 1)
     if len(dets) == 0:
         return None
     
     d = dets[0]
-    shape = predictor(dlib_image, d)
+    shape = predictor(np_image, d)
     
     # Get face bounding box
     left = d.left()
@@ -93,8 +94,10 @@ def align_face(image, predictor):
 def load_model(model_path, device):
     """Load the SAM model"""
     try:
-        # Mock model loading - in production would load actual SAM model
-        st.info("Loading model...")
+        # In production, load actual model:
+        # model = torch.load(model_path, map_location=device)
+        # model.eval()
+        # For demo, just indicate model is loaded
         return True
     except Exception as e:
         st.error(f"Error loading model: {e}")
@@ -107,43 +110,57 @@ def generate_aged_images(image, ages=[0, 10, 20, 30, 40, 50, 60, 70, 80]):
     model_path = download_model()
     
     if not predictor_path or not model_path:
+        st.error("Failed to load required resources")
         return None
     
-    # Convert to numpy for dlib
-    predictor = dlib.shape_predictor(predictor_path)
-    pil_image = image.convert("RGB")
-    np_image = np.array(pil_image)
-    dlib_image = dlib.load_rgb_image if isinstance(np_image, str) else np_image
+    try:
+        # Load predictor
+        predictor = dlib.shape_predictor(predictor_path)
+        pil_image = image.convert("RGB")
+        
+        # Align face
+        aligned = align_face(pil_image, predictor)
+        if aligned is None:
+            st.error("No face detected. Please upload a clear face image.")
+            return None
+        
+        # Transform
+        img_transforms = transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
+        ])
+        
+        transformed = img_transforms(aligned).unsqueeze(0).to(device)
+        
+        # Load model (production use)
+        # model = load_model(model_path, device)
+        
+        results = []
+        to_pil = transforms.ToPILImage()
+        
+        for age in ages:
+            # Age channel (normalized 0-1)
+            age_value = age / 100.0
+            age_channel = torch.full((1, 1, 256, 256), age_value, device=device)
+            
+            # Concatenate image and age channel
+            input_with_age = torch.cat([transformed, age_channel], dim=1)
+            
+            # In production: result = model(input_with_age)
+            # For demo, use original image
+            with torch.no_grad():
+                result = transformed.clone()
+            
+            # Denormalize and convert to PIL
+            result_image = ((result.squeeze(0).cpu() + 1) / 2).clamp(0, 1)
+            pil_result = to_pil(result_image)
+            results.append(pil_result)
+        
+        return results
     
-    # Align face
-    aligned = align_face(pil_image, predictor)
-    if aligned is None:
-        st.error("No face detected. Please upload a clear face image.")
+    except Exception as e:
+        st.error(f"Error generating images: {e}")
         return None
-    
-    # Transform
-    img_transforms = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Normalize([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
-    ])
-    
-    transformed = img_transforms(aligned).unsqueeze(0)
-    
-    results = []
-    for age in ages:
-        # Age channel
-        age_value = age / 100.0
-        age_channel = torch.full((1, 1, 256, 256), age_value)
-        
-        # Concatenate
-        input_with_age = torch.cat([transformed, age_channel], dim=1)
-        
-        # For demo, just create a placeholder
-        result = transformed.clone()
-        result_image = ((result.squeeze(0) + 1) / 2).clamp(0, 1)
-        results.append(transforms.ToPILImage()(result_image))
-    
-    return results
 
 # UI
 st.title("👤 Face Aging & De-aging Tool")
@@ -178,7 +195,6 @@ with col2:
                         with col:
                             st.image(res, caption=f"Age {age}")
                     
-                    # Download all results
                     st.success("✅ Generation complete!")
     else:
         st.info("👆 Upload an image to get started")
